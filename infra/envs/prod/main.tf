@@ -6,6 +6,7 @@ locals {
     Environment = var.environment
     ManagedBy   = "terraform"
     Repository  = "devops-assessment-terraform-db"
+    Owner       = "platform-team"
   }
 }
 
