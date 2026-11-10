@@ -1,0 +1,60 @@
+name: database
+
+on:
+  pull_request:
+    paths:
+      - "db/**"
+      - "scripts/**"
+      - "docker-compose.yml"
+      - ".github/workflows/database.yml"
+  push:
+    branches: [main]
+    paths:
+      - "db/**"
+      - "scripts/**"
+      - "docker-compose.yml"
+      - ".github/workflows/database.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: compose up -> backup -> restore -> explain
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck scripts
+        run: shellcheck -x scripts/*.sh db/*.sh db/init/*.sh
+
+      - name: End-to-end database test
+        run: ./scripts/e2e.sh | tee e2e.log
+
+      - name: Second backup + restore with a custom target (retention and naming)
+        run: |
+          BACKUP_KEEP=1 ./scripts/backup.sh
+          test "$(ls backups/*.dump | wc -l)" -eq 1
+          RESTORE_DB=hotel_db_ci_copy ./scripts/restore.sh
+
+      - name: Restore refuses to overwrite the source database
+        run: |
+          if RESTORE_DB=hotel_db ./scripts/restore.sh; then
+            echo "restore.sh should have refused" && exit 1
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-e2e
+          path: |
+            e2e.log
+            backups/*.manifest
+          retention-days: 7
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose logs db

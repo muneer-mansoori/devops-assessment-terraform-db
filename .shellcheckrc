@@ -1,0 +1,4 @@
+# Resolve `source "$(dirname ...)/lib.sh"` relative to each script.
+source-path=SCRIPTDIR
+# ls is only used on backup files this repo names itself (<db>_<UTC timestamp>.dump).
+disable=SC2012

@@ -1,0 +1,33 @@
+name: hotel-booking
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: hotel-booking-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hotel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hotel_local_only}
+      POSTGRES_DB: ${POSTGRES_DB:-hotel_db}
+      SEED_BOOKINGS: ${SEED_BOOKINGS:-50000}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      # Bound to localhost only: the local DB is never exposed on the LAN.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on first start with an empty volume: applies migrations, then seed data.
+      - ./db/init/00-init.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
+      - ./db:/db:ro
+    healthcheck:
+      # Healthy only after init (migrations + seed) has finished: the initdb phase listens on a socket only,
+      # so a TCP check against 127.0.0.1 fails until the real server starts.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  pgdata:

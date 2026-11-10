@@ -1,0 +1,133 @@
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "scripts/tf-plan-offline.sh"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "scripts/tf-plan-offline.sh"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write # post the plan as a PR comment
+  id-token: write # OIDC to AWS, only used when AWS_PLAN_ROLE_ARN is configured
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.17.1"
+  TF_IN_AUTOMATION: "1"
+  # Set this repository variable to an IAM role (read-only + state access) to plan against real AWS.
+  # Left empty, the workflow plans offline: local state + mock credentials, no AWS account needed.
+  AWS_PLAN_ROLE_ARN: ${{ vars.AWS_PLAN_ROLE_ARN }}
+
+jobs:
+  fmt:
+    name: terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - run: terraform -chdir=infra fmt -check -recursive -diff
+
+  plan:
+    name: plan (${{ matrix.env }})
+    needs: fmt
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # --- Real AWS path (only when a plan role is configured) ----------------------------------------
+      - name: Configure AWS credentials (OIDC)
+        if: env.AWS_PLAN_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_PLAN_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      - name: init / validate / plan (real backend)
+        if: env.AWS_PLAN_ROLE_ARN != ''
+        working-directory: infra/envs/${{ matrix.env }}
+        run: |
+          mkdir -p ../../../plans
+          terraform init -input=false
+          terraform validate -no-color
+          terraform plan -input=false -refresh=false -no-color -lock=false \
+            -out=../../../plans/${{ matrix.env }}.tfplan | tee ../../../plans/${{ matrix.env }}.plan.txt
+
+      # --- Offline path (default for this assessment) --------------------------------------------------
+      - name: init / validate / plan (offline, mock credentials)
+        if: env.AWS_PLAN_ROLE_ARN == ''
+        run: ./scripts/tf-plan-offline.sh ${{ matrix.env }}
+
+      # --- Publish the plan -----------------------------------------------------------------------------
+      - name: Plan summary
+        id: summary
+        run: |
+          SUMMARY="$(grep -E '^(Plan:|No changes)' plans/${{ matrix.env }}.plan.txt | tail -n 1)"
+          echo "line=${SUMMARY}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Terraform plan: \`${{ matrix.env }}\`"
+            echo
+            echo "**${SUMMARY}**"
+            echo
+            echo '<details><summary>Full plan</summary>'
+            echo
+            echo '```hcl'
+            sed -n '/Terraform will perform/,$p' plans/${{ matrix.env }}.plan.txt | head -c 60000
+            echo '```'
+            echo '</details>'
+          } > plans/${{ matrix.env }}.comment.md
+          cat plans/${{ matrix.env }}.comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ matrix.env }}
+          path: |
+            plans/${{ matrix.env }}.plan.txt
+            plans/${{ matrix.env }}.tfplan
+          retention-days: 14
+
+      - name: Comment plan on PR
+        # Fork PRs get a read-only token; they still have the job summary and the artifact.
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        env:
+          ENV_NAME: ${{ matrix.env }}
+        with:
+          script: |
+            const fs = require('fs');
+            const env = process.env.ENV_NAME;
+            const marker = `<!-- terraform-plan:${env} -->`;
+            const body = `${marker}\n${fs.readFileSync(`plans/${env}.comment.md`, 'utf8')}\n\n` +
+              `_Commit ${context.sha.substring(0, 7)} · [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})_`;
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }

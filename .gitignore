@@ -1,0 +1,16 @@
+# Terraform
+**/.terraform/
+**/.terraform-offline/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+*_override.tf
+*_override.tf.json
+plans/
+
+# Local secrets and outputs
+.env
+backups/
+e2e.log
+.DS_Store
